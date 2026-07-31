@@ -1,0 +1,43 @@
+---
+# site.yml - Basic RHEL system baseline
+# Run through Ansible Automation Platform against a target host.
+# Idempotent: safe to run repeatedly.
+
+- name: Basic system baseline
+  hosts: all
+  become: true          # escalate to root for system changes (needs sudo on target)
+
+  tasks:
+    - name: Ensure chrony (time sync) is installed
+      ansible.builtin.dnf:
+        name: chrony
+        state: present
+
+    - name: Ensure chronyd is enabled and running
+      ansible.builtin.service:
+        name: chronyd
+        state: started
+        enabled: true
+
+    - name: Set a login warning banner (STIG-style control)
+      ansible.builtin.copy:
+        dest: /etc/issue
+        content: "Authorized users only. All activity may be monitored and recorded.\n"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Ensure firewalld is installed and running
+      ansible.builtin.dnf:
+        name: firewalld
+        state: present
+
+    - name: Enable and start firewalld
+      ansible.builtin.service:
+        name: firewalld
+        state: started
+        enabled: true
+
+    - name: Report completion
+      ansible.builtin.debug:
+        msg: "Baseline applied successfully on {{ inventory_hostname }}"
