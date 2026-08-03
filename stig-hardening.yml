@@ -1,0 +1,223 @@
+---
+# stig-hardening.yml — RHEL 9 DISA STIG-style hardening (representative subset)
+# Run through Ansible Automation Platform against a managed host.
+# Idempotent: safe to run repeatedly. Connects as a non-root sudo user.
+#
+# NOTE: This is a demonstrable subset of common STIG controls, not the full
+# 300+ control baseline. For complete coverage, pair with OpenSCAP/SCAP
+# (scap-security-guide) and the DISA RHEL 9 STIG Viewer.
+ 
+- name: RHEL 9 STIG-style hardening
+  hosts: all
+  become: true
+ 
+  handlers:
+    - name: Restart sshd
+      ansible.builtin.service:
+        name: sshd
+        state: restarted
+ 
+    - name: Reload sysctl
+      ansible.builtin.command: sysctl --system
+      changed_when: false
+ 
+    - name: Load audit rules
+      ansible.builtin.command: augenrules --load
+      changed_when: false
+ 
+  tasks:
+ 
+    # ---------------------------------------------------------------
+    # Baseline (time sync, firewall, warning banners)
+    # ---------------------------------------------------------------
+    - name: Ensure chrony (time sync) is installed
+      ansible.builtin.dnf:
+        name: chrony
+        state: present
+ 
+    - name: Ensure chronyd is enabled and running
+      ansible.builtin.service:
+        name: chronyd
+        state: started
+        enabled: true
+ 
+    - name: Ensure firewalld is installed
+      ansible.builtin.dnf:
+        name: firewalld
+        state: present
+ 
+    - name: Enable and start firewalld
+      ansible.builtin.service:
+        name: firewalld
+        state: started
+        enabled: true
+ 
+    - name: Set the DoD login warning banner (/etc/issue and /etc/issue.net)
+      ansible.builtin.copy:
+        dest: "{{ item }}"
+        content: >
+          You are accessing a U.S. Government (USG) Information System (IS)
+          that is provided for USG-authorized use only. By using this IS you
+          consent to monitoring, recording, and audit. Unauthorized use is
+          prohibited and may result in criminal and civil penalties.
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - /etc/issue
+        - /etc/issue.net
+ 
+    # ---------------------------------------------------------------
+    # SSH hardening  (drop-in file, applied to new sessions on restart)
+    # NOTE: We do NOT disable PasswordAuthentication, because AAP's
+    # machine credential authenticates esam with a password. Switch to
+    # key-only auth after moving the credential to an SSH key.
+    # ---------------------------------------------------------------
+    - name: Deploy STIG SSH hardening drop-in
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/50-stig.conf
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          # Managed by Ansible - STIG SSH hardening
+          PermitRootLogin no
+          PermitEmptyPasswords no
+          IgnoreRhosts yes
+          HostbasedAuthentication no
+          X11Forwarding no
+          Banner /etc/issue.net
+          ClientAliveInterval 600
+          ClientAliveCountMax 1
+          LoginGraceTime 60
+          MaxAuthTries 4
+      notify: Restart sshd
+ 
+    - name: Validate sshd config is syntactically valid
+      ansible.builtin.command: sshd -t
+      changed_when: false
+ 
+    # ---------------------------------------------------------------
+    # Password quality policy  (pwquality)
+    # ---------------------------------------------------------------
+    - name: Enforce password complexity (pwquality)
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: "^\\s*#?\\s*{{ item.key }}\\s*="
+        line: "{{ item.key }} = {{ item.value }}"
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - { key: "minlen",    value: "15" }
+        - { key: "dcredit",   value: "-1" }
+        - { key: "ucredit",   value: "-1" }
+        - { key: "lcredit",   value: "-1" }
+        - { key: "ocredit",   value: "-1" }
+        - { key: "difok",     value: "8" }
+        - { key: "maxrepeat", value: "3" }
+        - { key: "minclass",  value: "4" }
+ 
+    # ---------------------------------------------------------------
+    # Password aging policy  (login.defs)
+    # ---------------------------------------------------------------
+    - name: Enforce password aging (login.defs)
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: "^\\s*#?\\s*{{ item.key }}\\b"
+        line: "{{ item.key }}\t{{ item.value }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - { key: "PASS_MAX_DAYS", value: "60" }
+        - { key: "PASS_MIN_DAYS", value: "1" }
+        - { key: "PASS_WARN_AGE", value: "7" }
+        - { key: "ENCRYPT_METHOD", value: "SHA512" }
+ 
+    # ---------------------------------------------------------------
+    # Account lockout on failed logins  (faillock)
+    # ---------------------------------------------------------------
+    - name: Configure account lockout thresholds (faillock)
+      ansible.builtin.lineinfile:
+        path: /etc/security/faillock.conf
+        regexp: "^\\s*#?\\s*{{ item.key }}"
+        line: "{{ item.line }}"
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - { key: "deny",          line: "deny = 3" }
+        - { key: "unlock_time",   line: "unlock_time = 0" }
+        - { key: "fail_interval", line: "fail_interval = 900" }
+ 
+    # ---------------------------------------------------------------
+    # auditd  (install, enable, deploy STIG audit rules)
+    # ---------------------------------------------------------------
+    - name: Ensure audit is installed
+      ansible.builtin.dnf:
+        name: audit
+        state: present
+ 
+    - name: Ensure auditd is enabled and running
+      ansible.builtin.service:
+        name: auditd
+        state: started
+        enabled: true
+ 
+    - name: Deploy STIG audit rules
+      ansible.builtin.copy:
+        dest: /etc/audit/rules.d/stig.rules
+        owner: root
+        group: root
+        mode: "0640"
+        content: |
+          ## Managed by Ansible - STIG audit rules (subset)
+          -w /etc/sudoers -p wa -k identity
+          -w /etc/sudoers.d/ -p wa -k identity
+          -w /etc/passwd -p wa -k identity
+          -w /etc/shadow -p wa -k identity
+          -w /etc/group -p wa -k identity
+          -w /etc/gshadow -p wa -k identity
+          -w /var/log/faillock -p wa -k logins
+          -w /var/log/lastlog -p wa -k logins
+          -a always,exit -F arch=b64 -S execve -C uid!=euid -F euid=0 -k privileged
+          -a always,exit -F arch=b64 -S adjtimex,settimeofday,clock_settime -k time-change
+          -a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat -F auid>=1000 -F auid!=unset -k delete
+      notify: Load audit rules
+ 
+    # ---------------------------------------------------------------
+    # Kernel parameters  (sysctl STIG subset)
+    # ---------------------------------------------------------------
+    - name: Deploy STIG sysctl hardening
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-stig.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible - STIG kernel parameters
+          net.ipv4.conf.all.accept_redirects = 0
+          net.ipv4.conf.default.accept_redirects = 0
+          net.ipv4.conf.all.send_redirects = 0
+          net.ipv4.conf.default.send_redirects = 0
+          net.ipv4.conf.all.accept_source_route = 0
+          net.ipv4.conf.all.log_martians = 1
+          kernel.dmesg_restrict = 1
+          kernel.randomize_va_space = 2
+      notify: Reload sysctl
+ 
+    # ---------------------------------------------------------------
+    # SELinux enforcing  (STIG requires enforcing mode)
+    # ---------------------------------------------------------------
+    - name: Ensure SELinux is enforcing
+      ansible.posix.selinux:
+        policy: targeted
+        state: enforcing
+ 
+    - name: Report completion
+      ansible.builtin.debug:
+        msg: "STIG-style hardening applied on {{ inventory_hostname }}"
+ 
